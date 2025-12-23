@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 def get_sd3_image_post_process_func(
     od_config: OmniDiffusionConfig,
 ):
+    if od_config.output_type == "latent":
+        return lambda x: x
     model_name = od_config.model
     if os.path.exists(model_name):
         model_path = model_name
@@ -165,7 +167,7 @@ class StableDiffusion3Pipeline(
             model, subfolder="text_encoder_2", local_files_only=local_files_only
         )
         self.text_encoder_3 = T5EncoderModel.from_pretrained(
-            model, subfolder="text_encoder_3", local_files_only=local_files_only
+            model, subfolder="text_encoder_3", local_files_only=local_files_only, dtype=torch.float,
         )
         self.transformer = SD3Transformer2DModel(od_config=od_config)
 
@@ -181,6 +183,7 @@ class StableDiffusion3Pipeline(
         )
         self.default_sample_size =  128
         self.patch_size = 2
+        self.output_type = self.od_config.output_type
 
     def check_inputs(
         self,
@@ -194,7 +197,6 @@ class StableDiffusion3Pipeline(
         negative_prompt_3=None,
         prompt_embeds=None,
         negative_prompt_embeds=None,
-        callback_on_step_end_tensor_inputs=None,
         max_sequence_length=None,
     ):
         if (
@@ -306,7 +308,7 @@ class StableDiffusion3Pipeline(
         max_sequence_length: int = 256,
         dtype: torch.dtype | None = None,
     ):
-        dtype = dtype or self.text_encoder.dtype
+        dtype = dtype or self.text_encoder_3.dtype
 
         prompt = [prompt] if isinstance(prompt, str) else prompt
         batch_size = len(prompt)
@@ -329,7 +331,7 @@ class StableDiffusion3Pipeline(
             truncation=True,
             add_special_tokens=True,
             return_tensors="pt",
-        )
+        ).to(self.device)
         text_input_ids = text_inputs.input_ids
         untruncated_ids = self.tokenizer_3(prompt, padding="longest", return_tensors="pt").input_ids
 
@@ -465,10 +467,6 @@ class StableDiffusion3Pipeline(
         return self._guidance_scale
 
     @property
-    def attention_kwargs(self):
-        return self._attention_kwargs
-
-    @property
     def num_timesteps(self):
         return self._num_timesteps
 
@@ -507,11 +505,8 @@ class StableDiffusion3Pipeline(
                 "timestep": timestep / 1000,
                 "encoder_hidden_states": prompt_embeds,
                 "pooled_projections": pooled_prompt_embeds,
-                "attention_kwargs": self.attention_kwargs,
                 "return_dict": False,
             }
-            if self._cache_backend is not None:
-                transformer_kwargs["cache_branch"] = "positive"
 
             noise_pred = self.transformer(**transformer_kwargs)[0]
 
@@ -523,14 +518,11 @@ class StableDiffusion3Pipeline(
                     "timestep": timestep / 1000,
                     "encoder_hidden_states": negative_prompt_embeds,
                     "pooled_projections": negative_pooled_prompt_embeds,
-                    "attention_kwargs": self.attention_kwargs,
                     "return_dict": False,
                 }
-                if self._cache_backend is not None:
-                    neg_transformer_kwargs["cache_branch"] = "negative"
 
                 neg_noise_pred = self.transformer(**neg_transformer_kwargs)[0]
-                comb_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
+                comb_pred = neg_noise_pred + self.guidance_scale * (noise_pred - neg_noise_pred)
                 cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
                 noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
                 noise_pred = comb_pred * (cond_norm / noise_norm)
@@ -547,7 +539,6 @@ class StableDiffusion3Pipeline(
         negative_prompt: str | list[str] = "",
         negative_prompt_2: str | list[str] = "",
         negative_prompt_3: str | list[str] = "",
-        guidance_scale: float = 7.0,
         height: int | None = None,
         width: int | None = None,
         num_inference_steps: int = 28,
@@ -559,9 +550,6 @@ class StableDiffusion3Pipeline(
         negative_prompt_embeds: torch.Tensor | None = None,
         pooled_prompt_embeds: torch.Tensor | None = None,
         negative_pooled_prompt_embeds:  torch.Tensor | None = None,
-        output_type: str | None = "pil",
-        attention_kwargs: dict[str, Any] | None = None,
-        callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 256,
     ) -> DiffusionOutput:
         # # TODO: only support single prompt now
@@ -593,13 +581,11 @@ class StableDiffusion3Pipeline(
             negative_prompt_3=negative_prompt_3,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
-            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
             max_sequence_length=max_sequence_length,
         )
 
 
-        self._guidance_scale = guidance_scale
-        self._attention_kwargs = attention_kwargs
+        self._guidance_scale = req.guidance_scale
         self._current_timestep = None
         self._interrupt = False
 
@@ -610,7 +596,7 @@ class StableDiffusion3Pipeline(
         else:
             batch_size = prompt_embeds.shape[0]
 
-        do_cfg = guidance_scale > 1
+        do_cfg = self.guidance_scale > 1
         prompt_embeds, pooled_prompt_embeds = self.encode_prompt(
             prompt=prompt,
             prompt_2=prompt_2,
@@ -643,10 +629,6 @@ class StableDiffusion3Pipeline(
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
 
-
-        if self.attention_kwargs is None:
-            self._attention_kwargs = {}
-
         latents = self.diffuse(
             prompt_embeds,
             pooled_prompt_embeds,
@@ -655,11 +637,11 @@ class StableDiffusion3Pipeline(
             latents,
             timesteps,
             do_cfg,
-            guidance_scale,
+            self.guidance_scale,
         )
 
         self._current_timestep = None
-        if output_type == "latent":
+        if self.output_type == "latent":
             image = latents
         else:
             latents = latents.to(self.vae.dtype)

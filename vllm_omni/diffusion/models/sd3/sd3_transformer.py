@@ -277,9 +277,7 @@ class SD3TransformerBlock(nn.Module):
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: torch.FloatTensor,
         temb: torch.FloatTensor,
-        joint_attention_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        joint_attention_kwargs = joint_attention_kwargs or {}
         if self.use_dual_attention:
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp, norm_hidden_states2, gate_msa2 = self.norm1(
                 hidden_states, emb=temb
@@ -367,7 +365,6 @@ class SD3Transformer2DModel(nn.Module):
     ):
         super().__init__()
         model_config = od_config.tf_model_config
-        print(model_config)
         self.num_layers = model_config.num_layers
         self.parallel_config = od_config.parallel_config
         self.sample_size = model_config.sample_size
@@ -462,7 +459,6 @@ class SD3Transformer2DModel(nn.Module):
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 temb=temb,
-                joint_attention_kwargs=attention_kwargs,
             )
 
         hidden_states = self.norm_out(hidden_states, temb)
@@ -508,7 +504,6 @@ class SD3Transformer2DModel(nn.Module):
                 params_dict[name] = buffer
 
         loaded_params: set[str] = set()
-        print(params_dict.keys())
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
