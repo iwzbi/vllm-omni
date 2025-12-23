@@ -5,7 +5,7 @@ import torch.nn as nn
 from diffusers.models.attention import FeedForward
 
 # TODO replace this with vLLM implementation
-from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings
+from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings, PatchEmbed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm, SD35AdaLayerNormZeroX
 from vllm.logger import init_logger
@@ -367,14 +367,7 @@ class SD3Transformer2DModel(nn.Module):
         self.patch_size = model_config.patch_size
         self.dual_attention_layers = model_config.dual_attention_layers
         self.qk_norm = model_config.qk_norm
-
-        # self.patch_embed = SD3PatchEmbed(
-        #     patch_size=self.patch_size,
-        #     in_channels=self.in_channels,
-        #     embed_dim=self.inner_dim,
-        # )
-
-        from diffusers.models.embeddings import PatchEmbed
+        self.pos_embed_max_size = model_config.pos_embed_max_size
 
         self.pos_embed = PatchEmbed(
             height=self.sample_size,
@@ -382,7 +375,7 @@ class SD3Transformer2DModel(nn.Module):
             patch_size=self.patch_size,
             in_channels=self.in_channels,
             embed_dim=self.inner_dim,
-            pos_embed_max_size=384,  # hard-code for now.
+            pos_embed_max_size=self.pos_embed_max_size,
         )
 
         self.time_text_embed = CombinedTimestepTextProjEmbeddings(
@@ -438,7 +431,6 @@ class SD3Transformer2DModel(nn.Module):
 
         height, width = hidden_states.shape[-2:]
 
-        # hidden_states = self.patch_embed(hidden_states)
         hidden_states = self.pos_embed(hidden_states)
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
@@ -482,11 +474,6 @@ class SD3Transformer2DModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-
-        # we need to load the buffers for beta and eps (XIELU)
-        for name, buffer in self.named_buffers():
-            if name.endswith(".beta") or name.endswith(".eps"):
-                params_dict[name] = buffer
 
         for name, buffer in self.named_buffers():
             if name.endswith(".pos_embed"):
