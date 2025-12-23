@@ -1,33 +1,19 @@
-import functools
 from collections.abc import Iterable
-from math import prod
-from typing import Any
 
 import torch
 import torch.nn as nn
 from diffusers.models.attention import FeedForward
 
 # TODO replace this with vLLM implementation
-from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings, get_2d_sincos_pos_embed
+from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.normalization import AdaLayerNormContinuous
+from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm, SD35AdaLayerNormZeroX
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.parallel_state import (
-    get_sequence_parallel_rank,
-    get_sequence_parallel_world_size,
-    get_sp_group,
-)
-from vllm_omni.diffusion.layers.rope import RotaryEmbedding
-from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm, SD35AdaLayerNormZeroX
-
-
-
 
 logger = init_logger(__name__)
 
@@ -58,9 +44,10 @@ class SD3PatchEmbed(nn.Module):
         )
 
     def forward(self, latent):
-        x = self.proj(latent) # [B, embed_dim, patch_size, patch_size]
-        x = x.flatten(2).transpose(1, 2) # [B, num_patches, embed_dim]
+        x = self.proj(latent)  # [B, embed_dim, patch_size, patch_size]
+        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
         return x
+
 
 class SD3CrossAttention(nn.Module):
     def __init__(
@@ -130,7 +117,6 @@ class SD3CrossAttention(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
     ):
-
         # Compute QKV for image stream (sample projections)
         qkv, _ = self.to_qkv(hidden_states)
         img_query, img_key, img_value = qkv.chunk(3, dim=-1)
@@ -177,7 +163,7 @@ class SD3CrossAttention(nn.Module):
         if encoder_hidden_states is not None:
             # Split attention outputs back
             context_seqlen = encoder_hidden_states.shape[1]
-            hidden_states, encoder_hidden_states  = (
+            hidden_states, encoder_hidden_states = (
                 hidden_states[:, context_seqlen:, :],  # Image part
                 hidden_states[:, :context_seqlen, :],  # Text part
             )
@@ -192,6 +178,7 @@ class SD3CrossAttention(nn.Module):
             return hidden_states
         else:
             return hidden_states, encoder_hidden_states
+
 
 class SD3TransformerBlock(nn.Module):
     r"""
@@ -220,14 +207,14 @@ class SD3TransformerBlock(nn.Module):
 
         self.use_dual_attention = use_dual_attention
         self.context_pre_only = context_pre_only
-        context_norm_type = "ada_norm_continous" if context_pre_only else "ada_norm_zero"
+        context_norm_type = "ada_norm_continuous" if context_pre_only else "ada_norm_zero"
 
         if use_dual_attention:
             self.norm1 = SD35AdaLayerNormZeroX(dim)
         else:
             self.norm1 = AdaLayerNormZero(dim)
 
-        if context_norm_type == "ada_norm_continous":
+        if context_norm_type == "ada_norm_continuous":
             self.norm1_context = AdaLayerNormContinuous(
                 dim, dim, elementwise_affine=False, eps=1e-6, bias=True, norm_type="layer_norm"
             )
@@ -235,9 +222,9 @@ class SD3TransformerBlock(nn.Module):
             self.norm1_context = AdaLayerNormZero(dim)
         else:
             raise ValueError(
-                f"Unknown context_norm_type: {context_norm_type}, currently only support `ada_norm_continous`, `ada_norm_zero`"
+                f"Unknown context_norm_type: {context_norm_type}, currently "
+                f"only support `ada_norm_continuous`, `ada_norm_zero`"
             )
-
 
         self.attn = SD3CrossAttention(
             dim=dim,
@@ -359,6 +346,7 @@ class SD3Transformer2DModel(nn.Module):
         qk_norm (`str`, *optional*, defaults to `None`):
             The normalization to use for query and key in the attention layer. If `None`, no normalization is used.
     """
+
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
@@ -387,6 +375,7 @@ class SD3Transformer2DModel(nn.Module):
         # )
 
         from diffusers.models.embeddings import PatchEmbed
+
         self.pos_embed = PatchEmbed(
             height=self.sample_size,
             width=self.sample_size,

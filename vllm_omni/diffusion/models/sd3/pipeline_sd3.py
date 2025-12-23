@@ -1,12 +1,9 @@
 import inspect
 import json
 import logging
-import math
 import os
 from collections.abc import Iterable
-from typing import Any
 
-import numpy as np
 import torch
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.autoencoders import AutoencoderKL
@@ -15,7 +12,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from torch import nn
-from transformers import CLIPTokenizer, T5Tokenizer, CLIPTextModelWithProjection, T5EncoderModel 
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5Tokenizer
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -77,7 +74,7 @@ def retrieve_timesteps(
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, int]:
+):
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -90,15 +87,15 @@ def retrieve_timesteps(
             must be `None`.
         device (`str` or `torch.device`, *optional*):
             The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`list[int]`, *optional*):
+        timesteps (`List[int]`, *optional*):
             Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
             `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`list[float]`, *optional*):
+        sigmas (`List[float]`, *optional*):
             Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
             `num_inference_steps` and `timesteps` must be `None`.
 
     Returns:
-        `tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
         second element is the number of inference steps.
     """
     if timesteps is not None and sigmas is not None:
@@ -127,6 +124,7 @@ def retrieve_timesteps(
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
+
 
 class StableDiffusion3Pipeline(
     nn.Module,
@@ -158,8 +156,12 @@ class StableDiffusion3Pipeline(
             model, subfolder="scheduler", local_files_only=local_files_only
         )
         self.tokenizer = CLIPTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=local_files_only)
-        self.tokenizer_2 = CLIPTokenizer.from_pretrained(model, subfolder="tokenizer_2", local_files_only=local_files_only)
-        self.tokenizer_3 = T5Tokenizer.from_pretrained(model, subfolder="tokenizer_3", local_files_only=local_files_only)
+        self.tokenizer_2 = CLIPTokenizer.from_pretrained(
+            model, subfolder="tokenizer_2", local_files_only=local_files_only
+        )
+        self.tokenizer_3 = T5Tokenizer.from_pretrained(
+            model, subfolder="tokenizer_3", local_files_only=local_files_only
+        )
         self.text_encoder = CLIPTextModelWithProjection.from_pretrained(
             model, subfolder="text_encoder", local_files_only=local_files_only
         )
@@ -167,7 +169,9 @@ class StableDiffusion3Pipeline(
             model, subfolder="text_encoder_2", local_files_only=local_files_only
         )
         self.text_encoder_3 = T5EncoderModel.from_pretrained(
-            model, subfolder="text_encoder_3", local_files_only=local_files_only, dtype=torch.float,
+            model,
+            subfolder="text_encoder_3",
+            local_files_only=local_files_only,
         )
         self.transformer = SD3Transformer2DModel(od_config=od_config)
 
@@ -181,7 +185,7 @@ class StableDiffusion3Pipeline(
         self.tokenizer_max_length = (
             self.tokenizer.model_max_length if hasattr(self, "tokenizer") and self.tokenizer is not None else 77
         )
-        self.default_sample_size =  128
+        self.default_sample_size = 128
         self.patch_size = 2
         self.output_type = self.od_config.output_type
 
@@ -204,8 +208,11 @@ class StableDiffusion3Pipeline(
             or width % (self.vae_scale_factor * self.patch_size) != 0
         ):
             raise ValueError(
-                f"`height` and `width` have to be divisible by {self.vae_scale_factor * self.patch_size} but are {height} and {width}."
-                f"You can use height {height - height % (self.vae_scale_factor * self.patch_size)} and width {width - width % (self.vae_scale_factor * self.patch_size)}."
+                f"`height` and `width` have to be divisible by "
+                f"{self.vae_scale_factor * self.patch_size} but are "
+                f"{height} and {width}. You can use height "
+                f"{height - height % (self.vae_scale_factor * self.patch_size)} "
+                f"and width {width - width % (self.vae_scale_factor * self.patch_size)}."
             )
 
         if prompt is not None and prompt_embeds is not None:
@@ -260,7 +267,6 @@ class StableDiffusion3Pipeline(
 
         if max_sequence_length is not None and max_sequence_length > 512:
             raise ValueError(f"`max_sequence_length` cannot be greater than 512 but is {max_sequence_length}")
-
 
     def _get_clip_prompt_embeds(
         self,
@@ -349,7 +355,6 @@ class StableDiffusion3Pipeline(
 
         return prompt_embeds
 
-
     def encode_prompt(
         self,
         prompt: str | list[str],
@@ -410,8 +415,6 @@ class StableDiffusion3Pipeline(
 
         return prompt_embeds, pooled_prompt_embeds
 
-
-
     def prepare_latents(
         self,
         batch_size,
@@ -443,22 +446,22 @@ class StableDiffusion3Pipeline(
 
         return latents
 
-
     def prepare_timesteps(self, num_inference_steps, sigmas, image_seq_len):
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
-        # image_seq_len = latents.shape[1]
-        mu = calculate_shift(
-            image_seq_len,
-            self.scheduler.config.get("base_image_seq_len", 256),
-            self.scheduler.config.get("max_image_seq_len", 4096),
-            self.scheduler.config.get("base_shift", 0.5),
-            self.scheduler.config.get("max_shift", 1.16),
-        )
+        scheduler_kwargs = {}
+        if self.scheduler.config.get("use_dynamic_shifting", None):
+            mu = calculate_shift(
+                image_seq_len,
+                self.scheduler.config.get("base_image_seq_len", 256),
+                self.scheduler.config.get("max_image_seq_len", 4096),
+                self.scheduler.config.get("base_shift", 0.5),
+                self.scheduler.config.get("max_shift", 1.16),
+            )
+            scheduler_kwargs["mu"] = mu
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
             sigmas=sigmas,
-            mu=mu,
+            **scheduler_kwargs,
         )
         return timesteps, num_inference_steps
 
@@ -502,7 +505,7 @@ class StableDiffusion3Pipeline(
             # cache_branch is passed to hook for CFG-aware state management
             transformer_kwargs = {
                 "hidden_states": latents,
-                "timestep": timestep / 1000,
+                "timestep": timestep,
                 "encoder_hidden_states": prompt_embeds,
                 "pooled_projections": pooled_prompt_embeds,
                 "return_dict": False,
@@ -515,17 +518,14 @@ class StableDiffusion3Pipeline(
             if do_cfg:
                 neg_transformer_kwargs = {
                     "hidden_states": latents,
-                    "timestep": timestep / 1000,
+                    "timestep": timestep,
                     "encoder_hidden_states": negative_prompt_embeds,
                     "pooled_projections": negative_pooled_prompt_embeds,
                     "return_dict": False,
                 }
 
                 neg_noise_pred = self.transformer(**neg_transformer_kwargs)[0]
-                comb_pred = neg_noise_pred + self.guidance_scale * (noise_pred - neg_noise_pred)
-                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                noise_pred = comb_pred * (cond_norm / noise_norm)
+                noise_pred = neg_noise_pred + self.guidance_scale * (noise_pred - neg_noise_pred)
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
         return latents
@@ -549,7 +549,7 @@ class StableDiffusion3Pipeline(
         prompt_embeds: torch.Tensor | None = None,
         negative_prompt_embeds: torch.Tensor | None = None,
         pooled_prompt_embeds: torch.Tensor | None = None,
-        negative_pooled_prompt_embeds:  torch.Tensor | None = None,
+        negative_pooled_prompt_embeds: torch.Tensor | None = None,
         max_sequence_length: int = 256,
     ) -> DiffusionOutput:
         # # TODO: only support single prompt now
@@ -559,6 +559,8 @@ class StableDiffusion3Pipeline(
         negative_prompt = req.negative_prompt if req.negative_prompt is not None else negative_prompt
         height = req.height or self.default_sample_size * self.vae_scale_factor
         width = req.width or self.default_sample_size * self.vae_scale_factor
+        width = req.width or self.default_sample_size * self.vae_scale_factor
+        sigmas = req.sigmas or sigmas
         num_inference_steps = req.num_inference_steps or num_inference_steps
         generator = req.generator or generator
         req_num_outputs = getattr(req, "num_outputs_per_prompt", None)
@@ -584,7 +586,6 @@ class StableDiffusion3Pipeline(
             max_sequence_length=max_sequence_length,
         )
 
-
         self._guidance_scale = req.guidance_scale
         self._current_timestep = None
         self._interrupt = False
@@ -596,7 +597,6 @@ class StableDiffusion3Pipeline(
         else:
             batch_size = prompt_embeds.shape[0]
 
-        do_cfg = self.guidance_scale > 1
         prompt_embeds, pooled_prompt_embeds = self.encode_prompt(
             prompt=prompt,
             prompt_2=prompt_2,
@@ -605,6 +605,7 @@ class StableDiffusion3Pipeline(
             max_sequence_length=max_sequence_length,
         )
 
+        do_cfg = self.guidance_scale > 1
         if do_cfg:
             negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt(
                 prompt=negative_prompt,
