@@ -3,16 +3,44 @@
 
 import multiprocessing as mp
 import time
+import weakref
+from dataclasses import dataclass
 
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import SHUTDOWN_MESSAGE, OmniDiffusionConfig
 from vllm_omni.diffusion.registry import get_diffusion_post_process_func, get_diffusion_pre_process_func
 from vllm_omni.diffusion.request import OmniDiffusionRequest
-from vllm_omni.diffusion.scheduler import scheduler
+from vllm_omni.diffusion.scheduler import Scheduler, scheduler
 from vllm_omni.utils.platform_utils import get_diffusion_worker_class
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class BackgroundResources:
+    """Used as a finalizer for clean shutdown"""
+
+    scheduler: Scheduler | None = None
+    processes: list[mp.Process] | None = None
+
+    def __call__(self):
+        """Clean up background resources."""
+        if scheduler is not None:
+            try:
+                for _ in range(scheduler.num_workers):
+                    scheduler.mq.enqueue(SHUTDOWN_MESSAGE)
+                scheduler.close()
+            except Exception as exc:
+                logger.warning("Failed to send shutdown signal: %s", exc)
+        for proc in self.processes:
+            if not proc.is_alive():
+                continue
+            proc.join(30)
+            if proc.is_alive():
+                logger.warning("Terminating diffusion worker %s after timeout", proc.name)
+                proc.terminate()
+                proc.join(30)
 
 
 class DiffusionEngine:
@@ -86,6 +114,8 @@ class DiffusionEngine:
             logger.error("Failed to get result queue handle from workers")
 
         self._processes = processes
+        self.resources = BackgroundResources(scheduler=scheduler, processes=self._processes)
+        self._finalizer = weakref.finalize(self, self.resources)
 
     def _launch_workers(self, broadcast_handle):
         od_config = self.od_config
@@ -167,31 +197,8 @@ class DiffusionEngine:
         logger.info("dummy run to warm up the model")
         self.add_req_and_wait_for_response([req])
 
-    def close(self, *, timeout_s: float = 30.0) -> None:
-        if self._closed:
-            return
-        self._closed = True
-
-        # Send shutdown signal to worker processes via broadcast queue
-        try:
-            if getattr(scheduler, "mq", None) is not None:
-                for _ in range(self.od_config.num_gpus or 1):
-                    scheduler.mq.enqueue(SHUTDOWN_MESSAGE)
-        except Exception as exc:  # pragma: no cover - best effort cleanup
-            logger.warning("Failed to send shutdown signal: %s", exc)
-
-        # Join all worker processes, terminate if they refuse to exit
-        for proc in self._processes:
-            if not proc.is_alive():
-                continue
-            proc.join(timeout_s)
-            if proc.is_alive():
-                logger.warning("Terminating diffusion worker %s after timeout", proc.name)
-                proc.terminate()
-                proc.join(timeout_s)
-
-        scheduler.close()
-        self._processes = []
+    def close(self) -> None:
+        self._finalizer()
 
     def __del__(self):  # pragma: no cover - best effort cleanup
         self.close()
