@@ -141,8 +141,8 @@ class LongCatImageAttention(nn.Module):
 
         if image_rotary_emb is not None:
             cos, sin = image_rotary_emb  # [S, D/2]
-            cos.to(query.dtype)
-            sin.to(query.dtype)
+            cos = cos.to(query.dtype)
+            sin = sin.to(query.dtype)
             query = self.rope(query, cos, sin)
             key = self.rope(key, cos, sin)
 
