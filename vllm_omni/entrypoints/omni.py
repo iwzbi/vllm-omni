@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import time
 import uuid
+import weakref
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
@@ -98,6 +99,7 @@ class Omni:
         # based on stage_type in YAML config (handled in omni_stage.py)
         logger.info(f"Initializing stages for model: {model}")
         self._initialize_stages(model, kwargs)
+        self._finalizer = weakref.finalize(self, self.close)
 
     def _initialize_stages(self, model: str, kwargs: dict[str, Any]) -> None:
         """Initialize stage list management.
