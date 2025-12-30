@@ -102,7 +102,7 @@ class OmniBase:
         # based on stage_type in YAML config (handled in omni_stage.py)
         logger.info(f"Initializing stages for model: {model}")
         self._initialize_stages(model, kwargs)
-        self._finalizer = weakref.finalize(self, self.close)
+        self._finalizer = weakref.finalize(self, self._safe_close, weakref.ref(self))
 
     def _get_default_cache_config(self, cache_backend: str | None) -> dict[str, Any] | None:
         if cache_backend == "cache_dit":
@@ -334,6 +334,12 @@ class OmniBase:
                     logger.warning(f"[{self._name}] Failed to stop stage worker: {e}")
 
             try_close_ray(self._ray_pg)
+
+    @staticmethod
+    def _safe_close(omni_ref):
+        omni = omni_ref()
+        if omni is not None:
+            omni.close()
 
     def __del__(self):  # pragma: no cover - best effort cleanup
         try:
