@@ -103,7 +103,7 @@ class OmniBase:
         # based on stage_type in YAML config (handled in omni_stage.py)
         logger.info(f"Initializing stages for model: {model}")
         self._initialize_stages(model, kwargs)
-        self._finalizer = weakref.finalize(self, self._safe_close, weakref.ref(self))
+        self._finalizer = weakref.finalize(self, self.shutdown, self.stage_list, self._ray_pg)
 
     def _get_default_cache_config(self, cache_backend: str | None) -> dict[str, Any] | None:
         if cache_backend == "cache_dit":
@@ -316,36 +316,19 @@ class OmniBase:
         elif len(self._stages_ready) == num_stages:
             logger.info(f"[{self._name}] All stages initialized successfully")
 
-    def close(self) -> None:
-        """Close all stage processes and clean up resources."""
-        # Close stages if they exist (for LLM models)
-        if self.stage_list:
-            for q in self._stage_in_queues:
-                try:
-                    q.put_nowait(None)
-                except Exception as e:
-                    logger.warning(
-                        f"[{self._name}] Failed to send shutdown signal to stage input queue: {e}",
-                    )
-            for stage in self.stage_list:
-                try:
-                    stage.stop_stage_worker()
-                except Exception as e:
-                    logger.warning(f"[{self._name}] Failed to stop stage worker: {e}")
-
-            try_close_ray(self._ray_pg)
-
     @staticmethod
-    def _safe_close(omni_ref):
-        omni = omni_ref()
-        if omni is not None:
-            omni.close()
+    def shutdown(stage_list: list[OmniStage], ray_pg) -> None:
+        """Close all stage processes and clean up resources."""
+        for stage in stage_list:
+            try:
+                stage.stop_stage_worker()
+            except Exception as e:
+                logger.warning(f"Failed to stop stage worker: {e}")
 
-    def __del__(self):  # pragma: no cover - best effort cleanup
-        try:
-            self.close()
-        except Exception:
-            logger.debug(f"[{self._name}] __del__ close() raised", exc_info=True)
+        try_close_ray(ray_pg)
+
+    def close(self) -> None:
+        self._finalizer()
 
     @property
     def _name(self) -> str:
