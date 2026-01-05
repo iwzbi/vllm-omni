@@ -12,41 +12,19 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from vllm_omni.diffusion.attention.backends.abstract import (
+    AttentionMetadata,
+)
 from vllm_omni.diffusion.attention.layer import Attention
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import OmniDiffusionConfig, get_current_omni_diffusion_config
+from vllm_omni.diffusion.distributed.parallel_state import (
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
+)
+from vllm_omni.diffusion.forward_context import get_forward_context
 
 logger = init_logger(__name__)
-
-
-class SD3PatchEmbed(nn.Module):
-    """
-    2D Image to Patch Embedding with support for SD3.
-
-    Args:
-        patch_size (`int`, defaults to `16`): The size of the patches.
-        in_channels (`int`, defaults to `3`): The number of input channels.
-        embed_dim (`int`, defaults to `768`): The output dimension of the embedding.
-    """
-
-    def __init__(
-        self,
-        patch_size=16,
-        in_channels=3,
-        embed_dim=768,
-    ):
-        super().__init__()
-
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
-
-        self.proj = nn.Conv2d(
-            in_channels, embed_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True
-        )
-
-    def forward(self, latent):
-        x = self.proj(latent)  # [B, embed_dim, patch_size, patch_size]
-        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
-        return x
 
 
 class SD3CrossAttention(nn.Module):
@@ -111,6 +89,11 @@ class SD3CrossAttention(nn.Module):
             softmax_scale=1.0 / (self.head_dim**0.5),
             causal=False,
         )
+        try:
+            config = get_current_omni_diffusion_config()
+            self.parallel_config = config.parallel_config
+        except Exception:
+            self.parallel_config = None
 
     def forward(
         self,
@@ -130,6 +113,7 @@ class SD3CrossAttention(nn.Module):
         img_query = self.norm_q(img_query)
         img_key = self.norm_k(img_key)
 
+        txt_query = txt_key = txt_value = None
         if encoder_hidden_states is not None:
             # Compute QKV for text stream (context projections)
             qkv, _ = self.add_kv_proj(encoder_hidden_states)
@@ -152,11 +136,36 @@ class SD3CrossAttention(nn.Module):
             key = img_key
             value = img_value
 
-        hidden_states = self.attn(
-            query,
-            key,
-            value,
-        )
+        if (
+            self.parallel_config is not None
+            and self.parallel_config.sequence_parallel_size > 1
+            and not get_forward_context().split_text_embed_in_sp
+        ):
+            # if using sequence parallel, but not splitting text embed,
+            #  we need to pass text embedding to attention layer as joint qkv
+            if txt_query is not None:
+                attn_metadata = AttentionMetadata(
+                    joint_query=txt_query,
+                    joint_key=txt_key,
+                    joint_value=txt_value,
+                    joint_strategy="front",
+                )
+            else:
+                attn_metadata = None
+
+            hidden_states = self.attn(
+                img_query,
+                img_key,
+                img_value,
+                attn_metadata,
+            )
+        else:
+            hidden_states = self.attn(
+                query,
+                key,
+                value,
+            )
+
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
@@ -329,6 +338,7 @@ class SD3Transformer2DModel(nn.Module):
     ):
         super().__init__()
         model_config = od_config.tf_model_config
+        self.parallel_config = od_config.parallel_config
         self.num_layers = model_config.num_layers
         self.parallel_config = od_config.parallel_config
         self.sample_size = model_config.sample_size
@@ -390,7 +400,7 @@ class SD3Transformer2DModel(nn.Module):
         The [`SD3Transformer2DModel`] forward method.
 
         Args:
-            hidden_states (`torch.Tensor` of shape `(batch_size, image_sequence_length, in_channels)`):
+            hidden_states (`torch.Tensor` of shape `(batch size, channel, height, width)`):
                 Input `hidden_states`.
             encoder_hidden_states (`torch.Tensor` of shape `(batch_size, text_sequence_length, joint_attention_dim)`):
                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
@@ -412,6 +422,14 @@ class SD3Transformer2DModel(nn.Module):
         hidden_states = self.pos_embed(hidden_states)
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        if self.parallel_config.sequence_parallel_size > 1:
+            hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
+                get_sequence_parallel_rank()
+            ]
+            # NOTE:
+            # SD3 uses *dual-stream* (text + image) and runs a *joint attention*.
+            # text embeddings to be replicated across SP ranks for correctness.
+            get_forward_context().split_text_embed_in_sp = False
 
         for index_block, block in enumerate(self.transformer_blocks):
             encoder_hidden_states, hidden_states = block(
@@ -427,6 +445,9 @@ class SD3Transformer2DModel(nn.Module):
         patch_size = self.patch_size
         height = height // patch_size
         width = width // patch_size
+
+        if self.parallel_config.sequence_parallel_size > 1:
+            hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
 
         hidden_states = hidden_states.reshape(
             shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
