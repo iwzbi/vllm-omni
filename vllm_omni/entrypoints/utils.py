@@ -107,7 +107,8 @@ def resolve_model_config_path(model: str) -> str:
     except (ValueError, Exception):
         # If standard transformers format fails, try diffusers format
         if file_or_path_exists(model, "model_index.json", revision=None):
-            model_type = _try_get_class_name_from_diffusers_config(model)
+            # TODO: Perhaps a separate configuration file for each diffusion model.
+            model_type = "diffusion"
             if model_type is None:
                 raise ValueError(
                     f"Could not determine model_type for diffusers model: {model}. "
@@ -174,7 +175,9 @@ def load_stage_configs_from_model(model: str, base_engine_args: dict | None = No
     return stage_configs
 
 
-def load_stage_configs_from_yaml(config_path: str, base_engine_args: dict | None = None) -> list:
+def load_stage_configs_from_yaml(
+    config_path: str, default_stage_cfg: list | None = None, base_engine_args: dict | None = None
+) -> list:
     """Load stage configurations from a YAML file.
 
     Args:
@@ -186,17 +189,20 @@ def load_stage_configs_from_yaml(config_path: str, base_engine_args: dict | None
     if base_engine_args is None:
         base_engine_args = {}
     config_data = OmegaConf.load(config_path)
-    stage_args = config_data.stage_args
+    loaded_stage_args = config_data.stage_args
     # Convert any nested dataclass objects to dicts before creating OmegaConf
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
     base_engine_args = OmegaConf.create(base_engine_args)
-    for stage_arg in stage_args:
+    stages = default_stage_cfg if default_stage_cfg is not None else loaded_stage_args
+    for stage_idx, stage_arg in enumerate(stages):
+        loaded_args = loaded_stage_args[stage_idx]
+        loaded_args = OmegaConf.merge(stage_arg, loaded_args)
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
         if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
             base_engine_args_tmp = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args)
-        stage_arg.engine_args = base_engine_args_tmp
-    return stage_args
+        loaded_args.engine_args = base_engine_args_tmp
+    return loaded_stage_args
 
 
 def get_final_stage_id_for_e2e(

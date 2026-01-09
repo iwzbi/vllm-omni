@@ -152,44 +152,6 @@ class OmniBase:
             cache_config = self._get_default_cache_config(cache_backend)
         return cache_config
 
-    def _create_default_diffusion_stage_cfg(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Create default diffusion stage configuration."""
-        # We temporally create a default config for diffusion stage.
-        # In the future, we should merge the default config with the user-provided config.
-        # TODO: hack, convert dtype to string to avoid non-premitive omegaconf create error.
-        if "dtype" in kwargs:
-            kwargs["dtype"] = str(kwargs["dtype"])
-        cache_backend = kwargs.get("cache_backend", "none")
-        cache_config = self._normalize_cache_config(cache_backend, kwargs.get("cache_config", None))
-        # TODO: hack, calculate devices based on parallel config.
-        devices = "0"
-        if "parallel_config" in kwargs:
-            num_devices = kwargs["parallel_config"].world_size
-            for i in range(1, num_devices):
-                devices += f",{i}"
-        default_stage_cfg = [
-            {
-                "stage_id": 0,
-                "stage_type": "diffusion",
-                "runtime": {
-                    "process": True,
-                    "devices": devices,
-                    "max_batch_size": 1,
-                },
-                "engine_args": OmegaConf.create(
-                    {
-                        **kwargs,
-                        "cache_backend": cache_backend,
-                        "cache_config": cache_config,
-                    }
-                ),
-                "final_output": True,
-                "final_output_type": "image",
-            }
-        ]
-        default_stage_cfg[0]["engine_args"]["model_stage"] = "diffusion"
-        return default_stage_cfg
-
     def _initialize_stages(self, model: str, kwargs: dict[str, Any]) -> None:
         """Initialize stage list management."""
         stage_init_timeout = kwargs.get("stage_init_timeout", 20)
@@ -207,16 +169,15 @@ class OmniBase:
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
 
         # Load stage configurations from YAML
+        default_stage_cfg = load_stage_configs_from_model(model, base_engine_args=base_engine_args)
         if stage_configs_path is None:
             self.config_path = resolve_model_config_path(model)
-            self.stage_configs = load_stage_configs_from_model(model, base_engine_args=base_engine_args)
-            if not self.stage_configs:
-                default_stage_cfg = self._create_default_diffusion_stage_cfg(kwargs)
-                self.stage_configs = OmegaConf.create(default_stage_cfg)
+            self.stage_configs = OmegaConf.create(default_stage_cfg)
         else:
             self.config_path = stage_configs_path
-            self.stage_configs = load_stage_configs_from_yaml(stage_configs_path, base_engine_args=base_engine_args)
-
+            self.stage_configs = load_stage_configs_from_yaml(
+                stage_configs_path, default_stage_cfg=default_stage_cfg, base_engine_args=base_engine_args
+            )
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
             self.config_path, worker_backend=worker_backend, shm_threshold_bytes=shm_threshold_bytes
