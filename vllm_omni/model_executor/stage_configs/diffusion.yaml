@@ -6,7 +6,7 @@ stage_args:
     devices: '0'
     max_batch_size: 1
   engine_args:
-    model: /model/stable-diffusion-3.5-medium/
+    model: Qwen/Qwen-Image
     dtype: float16
     cache_backend: none
     cache_config: null

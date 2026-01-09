@@ -150,7 +150,9 @@ def resolve_model_config_path(model: str) -> str:
     return str(stage_config_path)
 
 
-def load_stage_configs_from_model(model: str, base_engine_args: dict | None = None) -> list:
+def load_stage_configs_from_model(
+    model: str, base_engine_args: dict | None = None, override_engine_args: dict | None = None
+) -> list:
     """Load stage configurations from model's default config file.
 
     Loads stage configurations based on the model type and device type.
@@ -171,12 +173,17 @@ def load_stage_configs_from_model(model: str, base_engine_args: dict | None = No
     stage_config_path = resolve_model_config_path(model)
     if stage_config_path is None:
         return []
-    stage_configs = load_stage_configs_from_yaml(config_path=stage_config_path, base_engine_args=base_engine_args)
+    stage_configs = load_stage_configs_from_yaml(
+        config_path=stage_config_path, base_engine_args=base_engine_args, override_engine_args=override_engine_args
+    )
     return stage_configs
 
 
 def load_stage_configs_from_yaml(
-    config_path: str, default_stage_cfg: list | None = None, base_engine_args: dict | None = None
+    config_path: str,
+    default_stage_cfg: list | None = None,
+    base_engine_args: dict | None = None,
+    override_engine_args: dict | None = None,
 ) -> list:
     """Load stage configurations from a YAML file.
 
@@ -186,23 +193,30 @@ def load_stage_configs_from_yaml(
     Returns:
         List of stage configuration dictionaries from the file's stage_args
     """
-    if base_engine_args is None:
-        base_engine_args = {}
     config_data = OmegaConf.load(config_path)
     loaded_stage_args = config_data.stage_args
+
+    if base_engine_args is None:
+        base_engine_args = {}
+    if override_engine_args is None:
+        override_engine_args = {}
     # Convert any nested dataclass objects to dicts before creating OmegaConf
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
     base_engine_args = OmegaConf.create(base_engine_args)
-    stages = default_stage_cfg if default_stage_cfg is not None else loaded_stage_args
-    for stage_idx, stage_arg in enumerate(stages):
-        loaded_args = loaded_stage_args[stage_idx]
-        loaded_args = OmegaConf.merge(stage_arg, loaded_args)
+    override_engine_args = OmegaConf.create(override_engine_args)
+
+    if default_stage_cfg is not None:
+        stages = OmegaConf.merge(default_stage_cfg, loaded_stage_args)
+    else:
+        stages = loaded_stage_args
+
+    for stage_arg in stages:
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
         if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
-            base_engine_args_tmp = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args)
-        loaded_args.engine_args = base_engine_args_tmp
-    return loaded_stage_args
+            base_engine_args_tmp = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args, override_engine_args)
+        stage_arg.engine_args = base_engine_args_tmp
+    return stages
 
 
 def get_final_stage_id_for_e2e(
