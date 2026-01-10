@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pprint import pformat
 from typing import Any
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig
 from tqdm.auto import tqdm
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -34,9 +34,8 @@ from vllm_omni.entrypoints.stage_utils import SHUTDOWN_TASK, OmniStageTaskType
 from vllm_omni.entrypoints.stage_utils import maybe_load_from_ipc as _load
 from vllm_omni.entrypoints.utils import (
     get_final_stage_id_for_e2e,
-    load_stage_configs_from_model,
-    load_stage_configs_from_yaml,
-    resolve_model_config_path,
+    load_default_model_configs,
+    load_model_configs_from_yaml,
 )
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -169,21 +168,19 @@ class OmniBase:
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
         override_engine_args = {"model": model}
 
-        # Load stage configurations from YAML
-        default_stage_cfg = load_stage_configs_from_model(
+        # Load model configurations from YAML
+        default_model_cfg: DictConfig = load_default_model_configs(
             model, base_engine_args=base_engine_args, override_engine_args=override_engine_args
         )
         if stage_configs_path is None:
-            self.config_path = resolve_model_config_path(model)
-            self.stage_configs = OmegaConf.create(default_stage_cfg)
+            self.model_configs = default_model_cfg
         else:
-            self.config_path = stage_configs_path
-            self.stage_configs = load_stage_configs_from_yaml(
-                stage_configs_path, default_stage_cfg=default_stage_cfg, base_engine_args=base_engine_args
+            self.model_configs = load_model_configs_from_yaml(
+                stage_configs_path, default_model_cfg=default_model_cfg, base_engine_args=base_engine_args
             )
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
-            self.config_path, worker_backend=worker_backend, shm_threshold_bytes=shm_threshold_bytes
+            self.model_configs, worker_backend=worker_backend, shm_threshold_bytes=shm_threshold_bytes
         )
 
         # Initialize stats paths
@@ -198,8 +195,12 @@ class OmniBase:
             idx, cfg = idx_cfg
             return idx, OmniStage(cfg, stage_init_timeout=stage_init_timeout)
 
-        with ThreadPoolExecutor(max_workers=min(len(self.stage_configs), max(1, os.cpu_count() or 1))) as executor:
-            futures = [executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.stage_configs)]
+        with ThreadPoolExecutor(
+            max_workers=min(len(self.model_configs.stage_configs), max(1, os.cpu_count() or 1))
+        ) as executor:
+            futures = [
+                executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.model_configs.stage_configs)
+            ]
             results: list[tuple[int, OmniStage]] = []
             for fut in as_completed(futures):
                 results.append(fut.result())

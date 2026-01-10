@@ -3,10 +3,10 @@
 
 """Utilities for OmniConnector configuration and validation."""
 
-import json
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from omegaconf import DictConfig
 
 from ..factory import OmniConnectorFactory
 from .config import ConnectorSpec, OmniTransferConfig
@@ -21,15 +21,15 @@ logger = get_connector_logger(__name__)
 
 
 def initialize_connectors_from_config(
-    config_path: str | Path | None = None, default_shm_threshold: int = 65536
+    model_config: DictConfig, default_shm_threshold: int = 65536
 ) -> tuple[OmniTransferConfig | None, dict[tuple[str, str], OmniConnectorBase]]:
     """
-    Initialize connectors from configuration file.
+    Initialize connectors from model configuration.
 
     Returns:
         tuple: (OmniTransferConfig, dict of {(from, to): connector_instance})
     """
-    transfer_config = load_omni_transfer_config(config_path, default_shm_threshold=default_shm_threshold)
+    transfer_config = load_omni_transfer_config(model_config, default_shm_threshold=default_shm_threshold)
 
     if not transfer_config:
         logger.info("No OmniTransferConfig provided")
@@ -96,46 +96,24 @@ def get_connectors_config_for_stage(transfer_config: OmniTransferConfig | None, 
 
 
 def load_omni_transfer_config(
-    config_path: str | Path | None = None,
-    config_dict: dict[str, Any] | None = None,
+    model_config: DictConfig | None = None,
     default_shm_threshold: int = 65536,
 ) -> OmniTransferConfig | None:
-    """Load OmniTransferConfig from file or dict."""
-    if config_path is None and config_dict is None:
+    """Load OmniTransferConfig from model config."""
+    if model_config is None:
         # Even if no config provided, we might want to return a default config with SHM connectors
         # But without stage info we can't do much.
         return None
 
-    if config_path is not None:
-        config_path = Path(config_path)
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-
-        with open(config_path, encoding="utf-8") as f:
-            if config_path.suffix.lower() == ".json":
-                config_dict = json.load(f)
-            elif config_path.suffix.lower() in [".yaml", ".yml"]:
-                try:
-                    import yaml
-
-                    config_dict = yaml.safe_load(f)
-                except ImportError:
-                    raise ImportError("PyYAML required for YAML config files")
-            else:
-                raise ValueError(f"Unsupported config file format: {config_path.suffix}")
-
-    if config_dict is None:
-        return None
-
     # Parse connectors
     connectors = {}
-    runtime_config = config_dict.get("runtime", {})
+    runtime_config = model_config.get("runtime", {})
 
     # Parse global connectors (from runtime.connectors)
     global_connectors = runtime_config.get("connectors", {})
 
     # Parse stage-level connectors
-    stage_args = config_dict.get("stage_args", [])
+    stage_args = model_config.get("stage_args", [])
     expected_edges: set[tuple[str, str]] = set()
     for stage_config in stage_args:
         stage_id = str(stage_config["stage_id"])
@@ -237,11 +215,11 @@ def load_omni_transfer_config(
 
 
 def initialize_orchestrator_connectors(
-    config_path: str | None, worker_backend: str | None = "multi_process", shm_threshold_bytes: int = 65536
+    model_config: DictConfig, worker_backend: str | None = "multi_process", shm_threshold_bytes: int = 65536
 ) -> tuple[OmniTransferConfig | None, dict[tuple[str, str], OmniConnectorBase]]:
     """Initialize connectors shared at orchestrator level.
     Args:
-        config_path: The path to the configuration file.
+        model: The model config loaded from configuration file.
         worker_backend: The backend to use for the worker.
     Returns:
         A tuple containing the OmniTransferConfig and a dictionary of connectors.
@@ -251,7 +229,7 @@ def initialize_orchestrator_connectors(
     else:
         default_shm_threshold = max(0, shm_threshold_bytes)
     transfer_config, connectors = initialize_connectors_from_config(
-        config_path, default_shm_threshold=default_shm_threshold
+        model_config, default_shm_threshold=default_shm_threshold
     )
     return transfer_config, connectors
 

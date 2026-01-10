@@ -4,7 +4,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import ConfigAttributeError
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
@@ -150,12 +151,12 @@ def resolve_model_config_path(model: str) -> str:
     return str(stage_config_path)
 
 
-def load_stage_configs_from_model(
+def load_default_model_configs(
     model: str, base_engine_args: dict | None = None, override_engine_args: dict | None = None
-) -> list:
-    """Load stage configurations from model's default config file.
+) -> DictConfig:
+    """Load model configurations from model's default config file.
 
-    Loads stage configurations based on the model type and device type.
+    Loads model configurations based on the model type and device type.
     First tries to load a device-specific YAML file from stage_configs/{device_type}/
     directory. If not found, falls back to the default config file.
 
@@ -163,38 +164,43 @@ def load_stage_configs_from_model(
         model: Model name or path (used to determine model_type)
 
     Returns:
-        List of stage configuration dictionaries
+        Dict of model configuration dictionaries
 
     Raises:
-        FileNotFoundError: If no stage config file exists for the model type
+        FileNotFoundError: If no model config file exists for the model type
     """
     if base_engine_args is None:
         base_engine_args = {}
-    stage_config_path = resolve_model_config_path(model)
-    if stage_config_path is None:
+    model_config_path = resolve_model_config_path(model)
+    if model_config_path is None:
         return []
-    stage_configs = load_stage_configs_from_yaml(
-        config_path=stage_config_path, base_engine_args=base_engine_args, override_engine_args=override_engine_args
+    model_configs = load_model_configs_from_yaml(
+        config_path=model_config_path, base_engine_args=base_engine_args, override_engine_args=override_engine_args
     )
-    return stage_configs
+    return model_configs
 
 
-def load_stage_configs_from_yaml(
+def load_model_configs_from_yaml(
     config_path: str,
-    default_stage_cfg: list | None = None,
+    default_model_cfg: list | None = None,
     base_engine_args: dict | None = None,
     override_engine_args: dict | None = None,
-) -> list:
-    """Load stage configurations from a YAML file.
+) -> DictConfig:
+    """Load model configurations from a YAML file.
 
     Args:
         config_path: Path to the YAML configuration file
 
     Returns:
-        List of stage configuration dictionaries from the file's stage_args
+        Dict of model configuration dictionaries
     """
     config_data = OmegaConf.load(config_path)
-    loaded_stage_args = config_data.stage_args
+    if default_model_cfg is not None:
+        model_config = OmegaConf.merge(default_model_cfg, config_data)
+    else:
+        model_config = config_data
+
+    stage_configs = model_config.stage_args
 
     if base_engine_args is None:
         base_engine_args = {}
@@ -205,18 +211,19 @@ def load_stage_configs_from_yaml(
     base_engine_args = OmegaConf.create(base_engine_args)
     override_engine_args = OmegaConf.create(override_engine_args)
 
-    if default_stage_cfg is not None:
-        stages = OmegaConf.merge(default_stage_cfg, loaded_stage_args)
-    else:
-        stages = loaded_stage_args
-
-    for stage_arg in stages:
+    for stage_arg in stage_configs:
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
         if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
-            base_engine_args_tmp = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args, override_engine_args)
+            merged = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args)
+            OmegaConf.set_struct(merged, True)
+            try:
+                base_engine_args_tmp = OmegaConf.merge(merged, override_engine_args)
+            except ConfigAttributeError as e:
+                logger.warning(f"Skipping invalid keys in override: {e}")
+                base_engine_args_tmp = merged
         stage_arg.engine_args = base_engine_args_tmp
-    return stages
+    return model_config
 
 
 def get_final_stage_id_for_e2e(
