@@ -18,11 +18,6 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.engine.input_processor import OmniInputProcessor
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
-from vllm_omni.entrypoints.utils import (
-    load_stage_configs_from_model,
-    load_stage_configs_from_yaml,
-    resolve_model_config_path,
-)
 
 logger = init_logger(__name__)
 
@@ -37,7 +32,6 @@ class OmniLLM(LLM):
 
     Args:
         model: Model name or path to load
-        stage_configs_path: Optional path to YAML file containing stage
             configurations. If None, configurations are loaded from the model.
         log_stats: Whether to enable statistics logging
         compilation_config: Optional compilation configuration. Can be an
@@ -62,7 +56,6 @@ class OmniLLM(LLM):
     def __init__(
         self,
         model: str,
-        stage_configs_path: str | None = None,
         log_stats: bool = False,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         hf_overrides: dict[str, Any] | None = None,
@@ -79,14 +72,6 @@ class OmniLLM(LLM):
         self.ray_address = kwargs.get("ray_address", None)
         self.batch_timeout = batch_timeout
         self._enable_stats: bool = bool(log_stats)
-
-        # Load stage configurations
-        if stage_configs_path is None:
-            self.config_path = resolve_model_config_path(model)
-            self.stage_configs = load_stage_configs_from_model(model)
-        else:
-            self.config_path = stage_configs_path
-            self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
 
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
