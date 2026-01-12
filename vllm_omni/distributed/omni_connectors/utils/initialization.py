@@ -219,7 +219,7 @@ def initialize_orchestrator_connectors(
 ) -> tuple[OmniTransferConfig | None, dict[tuple[str, str], OmniConnectorBase]]:
     """Initialize connectors shared at orchestrator level.
     Args:
-        model: The model config loaded from configuration file.
+        model_config: The model config loaded from configuration file.
         worker_backend: The backend to use for the worker.
     Returns:
         A tuple containing the OmniTransferConfig and a dictionary of connectors.

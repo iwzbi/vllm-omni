@@ -196,10 +196,10 @@ class OmniBase:
             return idx, OmniStage(cfg, stage_init_timeout=stage_init_timeout)
 
         with ThreadPoolExecutor(
-            max_workers=min(len(self.model_configs.stage_configs), max(1, os.cpu_count() or 1))
+            max_workers=min(len(self.model_configs.stage_args), max(1, os.cpu_count() or 1))
         ) as executor:
             futures = [
-                executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.model_configs.stage_configs)
+                executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.model_configs.stage_args)
             ]
             results: list[tuple[int, OmniStage]] = []
             for fut in as_completed(futures):

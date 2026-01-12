@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import ConfigAttributeError
+from omegaconf.errors import ConfigKeyError
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
@@ -196,7 +196,7 @@ def load_model_configs_from_yaml(
     """
     config_data = OmegaConf.load(config_path)
     if default_model_cfg is not None:
-        model_config = OmegaConf.merge(default_model_cfg, config_data)
+        model_config = merge_model_configs(default_model_cfg, config_data)
     else:
         model_config = config_data
 
@@ -219,11 +219,34 @@ def load_model_configs_from_yaml(
             OmegaConf.set_struct(merged, True)
             try:
                 base_engine_args_tmp = OmegaConf.merge(merged, override_engine_args)
-            except ConfigAttributeError as e:
-                logger.warning(f"Skipping invalid keys in override: {e}")
+            except ConfigKeyError as _:
                 base_engine_args_tmp = merged
         stage_arg.engine_args = base_engine_args_tmp
     return model_config
+
+
+def merge_model_configs(default_cfg, override_cfg):
+    result = OmegaConf.create()
+    if "stage_args" in override_cfg and override_cfg.stage_args:
+        new_stage_args = []
+        for override_stage in override_cfg.stage_args:
+            override_stage_id = override_stage.stage_id
+            matched_stage = None
+            if "stage_args" in default_cfg:
+                for default_stage in default_cfg.stage_args:
+                    if default_stage.stage_id == override_stage_id:
+                        matched_stage = default_stage
+                        break
+            if matched_stage is not None:
+                merged_stage = OmegaConf.merge(matched_stage, override_stage)
+                new_stage_args.append(merged_stage)
+            else:
+                new_stage_args.append(override_stage)
+        result.stage_args = new_stage_args
+    for key in override_cfg:
+        if key != "stage_args":
+            OmegaConf.update(result, key, OmegaConf.to_object(override_cfg[key]))
+    return result
 
 
 def get_final_stage_id_for_e2e(
