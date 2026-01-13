@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import json
 import os
 import random
 from collections.abc import Callable
@@ -436,10 +437,42 @@ class OmniDiffusionConfig:
                 logger.warning(f"Unknown dtype string '{self.dtype}', defaulting to bfloat16")
                 self.dtype = torch.bfloat16
 
+        def _get_default_cache_config(cache_backend: str | None) -> dict[str, Any] | None:
+            if cache_backend == "cache_dit":
+                return {
+                    "Fn_compute_blocks": 1,
+                    "Bn_compute_blocks": 0,
+                    "max_warmup_steps": 4,
+                    "residual_diff_threshold": 0.24,
+                    "max_continuous_cached_steps": 3,
+                    "enable_taylorseer": False,
+                    "taylorseer_order": 1,
+                    "scm_steps_mask_policy": None,
+                    "scm_steps_policy": "dynamic",
+                }
+            if cache_backend == "tea_cache":
+                return {
+                    "rel_l1_thresh": 0.2,
+                }
+            return None
+
+        def _normalize_cache_config(cache_backend: str | None, cache_config: Any | None) -> Any | None:
+            if isinstance(cache_config, str):
+                try:
+                    cache_config = json.loads(cache_config)
+                except json.JSONDecodeError:
+                    logger.warning("Invalid cache_config JSON, using defaults.")
+                    cache_config = None
+            if cache_config is None and cache_backend not in (None, "", "none"):
+                cache_config = _get_default_cache_config(cache_backend)
+            return cache_config
+
+        cache_config = _normalize_cache_config(self.cache_backend, self.cache_config)
+
         # Convert cache_config dict to DiffusionCacheConfig if needed
-        if isinstance(self.cache_config, dict):
-            self.cache_config = DiffusionCacheConfig.from_dict(self.cache_config)
-        elif not isinstance(self.cache_config, DiffusionCacheConfig):
+        if isinstance(cache_config, dict):
+            self.cache_config = DiffusionCacheConfig.from_dict(cache_config)
+        elif not isinstance(cache_config, DiffusionCacheConfig):
             # If it's neither dict nor DiffusionCacheConfig, convert to empty config
             self.cache_config = DiffusionCacheConfig()
 
