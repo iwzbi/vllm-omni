@@ -17,6 +17,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.hf_utils import is_diffusion_model
 from vllm_omni.distributed.omni_connectors import (
     get_stage_connector_config,
     initialize_orchestrator_connectors,
@@ -135,7 +136,11 @@ class OmniBase:
         tokenizer = kwargs.get("tokenizer", None)
 
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
-        override_engine_args = {"model": model}
+
+        # Override default configs with CLI args
+        override_engine_args = kwargs.copy()
+        if is_diffusion_model(model):
+            override_engine_args["model"] = model
 
         # Load model configurations from YAML
         default_model_cfg: DictConfig = load_default_model_configs(

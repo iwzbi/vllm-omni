@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import ConfigKeyError
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
@@ -209,18 +208,15 @@ def load_model_configs_from_yaml(
     # Convert any nested dataclass objects to dicts before creating OmegaConf
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
     base_engine_args = OmegaConf.create(base_engine_args)
-    override_engine_args = OmegaConf.create(override_engine_args)
 
     for stage_arg in stage_configs:
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
         if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
-            merged = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args)
-            OmegaConf.set_struct(merged, True)
-            try:
-                base_engine_args_tmp = OmegaConf.merge(merged, override_engine_args)
-            except ConfigKeyError as _:
-                base_engine_args_tmp = merged
+            base_engine_args_tmp = OmegaConf.merge(base_engine_args_tmp, stage_arg.engine_args)
+        # Update engine_args with CLI args
+        for k, v in override_engine_args.items():
+            OmegaConf.update(base_engine_args_tmp, k, v)
         stage_arg.engine_args = base_engine_args_tmp
     return model_config
 
