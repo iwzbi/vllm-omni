@@ -17,10 +17,9 @@ from vllm_omni.diffusion.attention.backends.abstract import (
 )
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.parallel_state import (
-    get_sequence_parallel_rank,
-    get_sequence_parallel_world_size,
-    get_sp_group,
+from vllm_omni.diffusion.distributed.sp_plan import (
+    SequenceParallelInput,
+    SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
 
@@ -332,6 +331,15 @@ class SD3Transformer2DModel(nn.Module):
 
     _repeated_blocks = ["SD3TransformerBlock"]
 
+    _sp_plan = {
+        # Shard transformer block INPUT parameter
+        "transformer_blocks.0": {
+            "hidden_states": SequenceParallelInput(split_dim=1, expected_dims=3),
+        },
+        # Gather at final projection
+        "proj_out": SequenceParallelOutput(gather_dim=1, expected_dims=3),
+    }
+
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
@@ -422,14 +430,6 @@ class SD3Transformer2DModel(nn.Module):
         hidden_states = self.pos_embed(hidden_states)
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
-        if self.parallel_config.sequence_parallel_size > 1:
-            hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[
-                get_sequence_parallel_rank()
-            ]
-            # NOTE:
-            # SD3 uses *dual-stream* (text + image) and runs a *joint attention*.
-            # text embeddings to be replicated across SP ranks for correctness.
-            get_forward_context().split_text_embed_in_sp = False
 
         for index_block, block in enumerate(self.transformer_blocks):
             encoder_hidden_states, hidden_states = block(
@@ -445,9 +445,6 @@ class SD3Transformer2DModel(nn.Module):
         patch_size = self.patch_size
         height = height // patch_size
         width = width // patch_size
-
-        if self.parallel_config.sequence_parallel_size > 1:
-            hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
 
         hidden_states = hidden_states.reshape(
             shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
